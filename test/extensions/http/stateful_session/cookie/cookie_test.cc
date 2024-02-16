@@ -40,14 +40,32 @@ TEST(CookieBasedSessionStateFactoryTest, SessionStateTest) {
     auto upstream_host = std::make_shared<Envoy::Network::Address::Ipv4Instance>("1.2.3.4", 80);
     EXPECT_CALL(mock_host, address()).WillOnce(testing::Return(upstream_host));
 
-    Envoy::Http::TestResponseHeaderMapImpl response_headers;
-    session_state->onUpdate(mock_host, response_headers);
-
     // No valid address then update it by set-cookie.
-    EXPECT_EQ(response_headers.get_("set-cookie"),
-              Envoy::Http::Utility::makeSetCookieValue("override_host",
-                                                       Envoy::Base64::encode("1.2.3.4:80", 10), "",
-                                                       std::chrono::seconds(0), true));
+    // Run the test twice: once with proto cookie format and once
+    // with "old" style plain address.
+    for (bool use_proto : std::vector<bool>({true, false})) {
+      std::string cookie_content;
+      if (use_proto) {
+        envoy::Cookie cookie;
+        cookie.set_address("1.2.3.4:80");
+        // The expiration field is not set in the cookie because TTL is 0 in the config.
+        cookie.SerializeToString(&cookie_content);
+      } else {
+        cookie_content = "1.2.3.4:80";
+      }
+      Runtime::maybeSetRuntimeGuard(
+          "envoy.reloadable_features.stateful_session_encode_ttl_in_cookie", use_proto);
+
+      Envoy::Http::TestResponseHeaderMapImpl response_headers;
+      // Check the format of the cookie sent back to client.
+      session_state->onUpdate(mock_host, response_headers);
+      Envoy::Http::CookieAttributeRefVector cookie_attributes;
+      EXPECT_EQ(response_headers.get_("set-cookie"),
+                Envoy::Http::Utility::makeSetCookieValue(
+                    "override_host",
+                    Envoy::Base64::encode(cookie_content.c_str(), cookie_content.length()), "",
+                    std::chrono::seconds(0), true, cookie_attributes));
+    }
   }
 
   {
